@@ -68,12 +68,14 @@ def login_user(username, password):
     try:
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
-        cursor.execute("SELECT id FROM users WHERE username = ? AND password_hash = ?", (username, pwd_hash))
+        cursor.execute("SELECT password_hash FROM users WHERE username = ?", (username,))
         row = cursor.fetchone()
         conn.close()
-        if row:
+        if not row:
+            return False, "Username not found."
+        if row[0] == pwd_hash:
             return True, "Login successful."
-        return False, "Invalid username or password."
+        return False, "Incorrect password."
     except sqlite3.Error as e:
         return False, f"Database error: {e}"
 

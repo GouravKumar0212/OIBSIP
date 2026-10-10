@@ -1,3 +1,7 @@
+import os
+import sys
+import subprocess
+import time
 import socket
 import threading
 import json
@@ -27,6 +31,28 @@ def replace_emojis(text):
     return text
 
 
+def ensure_server_running(host, port):
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(0.6)
+        s.connect((host, port))
+        s.close()
+        return True
+    except (socket.error, ConnectionRefusedError):
+        pass
+
+    if host in ("127.0.0.1", "localhost"):
+        server_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "server.py")
+        if os.path.exists(server_path):
+            try:
+                subprocess.Popen([sys.executable, server_path], cwd=os.path.dirname(os.path.abspath(__file__)))
+                time.sleep(1.0)
+                return True
+            except Exception:
+                pass
+    return False
+
+
 class ChatClientApp:
     def __init__(self, root):
         self.root = root
@@ -40,6 +66,8 @@ class ChatClientApp:
         self.current_room = None
         self.is_focused = True
         self.unread_count = 0
+        self.pending_username = ""
+        self.pending_password = ""
 
         self.root.bind("<FocusIn>", self.on_focus_in)
         self.root.bind("<FocusOut>", self.on_focus_out)
@@ -96,6 +124,9 @@ class ChatClientApp:
         self.password_entry = tk.Entry(user_box, font=("Arial", 10), show="*")
         self.password_entry.grid(row=1, column=1, padx=10, pady=4, sticky="ew")
 
+        self.username_entry.bind("<Return>", lambda e: self.password_entry.focus())
+        self.password_entry.bind("<Return>", lambda e: self.handle_login())
+
         user_box.columnconfigure(1, weight=1)
 
         btn_row = tk.Frame(self.auth_frame, bg="#f5f7fa")
@@ -147,15 +178,20 @@ class ChatClientApp:
             self.auth_status.config(text="Port must be an integer.", fg="#d32f2f")
             return False
 
+        self.auth_status.config(text="Connecting to server...", fg="#1976d2")
+        self.root.update_idletasks()
+
+        ensure_server_running(host, port)
+
         try:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.sock.connect((host, port))
             t = threading.Thread(target=self.listen_server, daemon=True)
             t.start()
             return True
-        except (socket.error, ConnectionRefusedError) as e:
+        except (socket.error, ConnectionRefusedError):
             self.sock = None
-            self.auth_status.config(text=f"Failed to connect to server: {e}", fg="#d32f2f")
+            self.auth_status.config(text=f"Failed to connect to server ({host}:{port}).", fg="#d32f2f")
             return False
 
     def send_json(self, data):
@@ -175,9 +211,13 @@ class ChatClientApp:
             self.auth_status.config(text="Please enter username and password.", fg="#d32f2f")
             return
 
+        self.pending_username = username
+        self.pending_password = password
+
         if not self.connect_server():
             return
 
+        self.auth_status.config(text="Logging in...", fg="#1976d2")
         self.send_json({"type": "login", "username": username, "password": password})
 
     def handle_register(self):
@@ -188,9 +228,13 @@ class ChatClientApp:
             self.auth_status.config(text="Please enter username and password.", fg="#d32f2f")
             return
 
+        self.pending_username = username
+        self.pending_password = password
+
         if not self.connect_server():
             return
 
+        self.auth_status.config(text="Registering account...", fg="#1976d2")
         self.send_json({"type": "register", "username": username, "password": password})
 
     def build_chat_ui(self, initial_rooms):
@@ -399,7 +443,8 @@ class ChatClientApp:
             success = payload.get("success", False)
             msg = payload.get("message", "")
             if success:
-                self.auth_status.config(text=msg, fg="#2e7d32")
+                self.auth_status.config(text="Account created! Logging in...", fg="#2e7d32")
+                self.send_json({"type": "login", "username": self.pending_username, "password": self.pending_password})
             else:
                 self.auth_status.config(text=msg, fg="#d32f2f")
 
@@ -412,6 +457,13 @@ class ChatClientApp:
             else:
                 msg = payload.get("message", "Login failed.")
                 self.auth_status.config(text=msg, fg="#d32f2f")
+                if "username not found" in msg.lower():
+                    ask = messagebox.askyesno(
+                        "Account Not Found",
+                        f"Username '{self.pending_username}' is not registered yet.\n\nWould you like to register this account now?"
+                    )
+                    if ask:
+                        self.handle_register()
 
         elif msg_type == "room_joined":
             self.current_room = payload.get("room")
@@ -458,8 +510,9 @@ class ChatClientApp:
             self.update_rooms_list(rooms)
 
     def on_server_disconnect(self):
-        messagebox.showerror("Disconnected", "Lost connection to the chat server.")
-        self.sock = None
+        if self.sock:
+            messagebox.showerror("Disconnected", "Lost connection to the chat server.")
+            self.sock = None
 
     def on_close(self):
         if self.sock:
